@@ -4,7 +4,7 @@ import { NAIParams } from '../types';
 import { api } from './api';
 import { NAI_QUALITY_TAGS, NAI_UC_PRESETS } from './promptUtils';
 
-export const generateImage = async (apiKey: string, prompt: string, negative: string, params: NAIParams) => {
+export const generateImage = async (apiKey: string, prompt: string, negative: string, params: NAIParams, apiUrl?: string) => {
   // Logic update: NAI API treats missing seed as random. 0 is a specific seed.
   // We pass seed only if it is a valid number and not -1 (our internal convention for random).
   let seed: number | undefined = undefined;
@@ -114,7 +114,7 @@ export const generateImage = async (apiKey: string, prompt: string, negative: st
   // 调用 Worker Proxy, 传递 API Key Header
   const blob = await api.postBinary('/generate', payload, {
     'Authorization': `Bearer ${apiKey}`
-  });
+  }, apiUrl);
 
   // 解析 Zip (逻辑保持不变)
   const zip = await JSZip.loadAsync(blob);

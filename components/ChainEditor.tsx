@@ -97,6 +97,8 @@ export const ChainEditor: React.FC<ChainEditorProps> = ({ chain, allChains, curr
 
     // --- Generation State ---
     const [apiKey, setApiKey] = useState('');
+    const [apiUrl, setApiUrl] = useState('');
+    const [showApiSettings, setShowApiSettings] = useState(false);
     const [isGenerating, setIsGenerating] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [generatedImage, setGeneratedImage] = useState<string | null>(null);
@@ -149,9 +151,11 @@ export const ChainEditor: React.FC<ChainEditorProps> = ({ chain, allChains, curr
         setActiveModules(initialModules);
         setHasChanges(false);
 
-        // Load API Key
+        // Load API Key & URL
         const savedKey = localStorage.getItem('nai_api_key');
         if (savedKey) setApiKey(savedKey);
+        const savedUrl = localStorage.getItem('nai_api_url');
+        if (savedUrl) setApiUrl(savedUrl);
 
     }, [chain.id, chain.basePrompt, chain.negativePrompt, chain.modules, chain.params, chain.name, chain.description, chain.variableValues]);
     // Dependency note: we still list props to satisfy linter, but the guard 'if (prevChainId === chain.id) return' blocks re-execution.
@@ -191,6 +195,11 @@ export const ChainEditor: React.FC<ChainEditorProps> = ({ chain, allChains, curr
     const handleApiKeyChange = (val: string) => {
         setApiKey(val);
         localStorage.setItem('nai_api_key', val);
+    };
+
+    const handleApiUrlChange = (val: string) => {
+        setApiUrl(val);
+        localStorage.setItem('nai_api_url', val);
     };
 
     const getDownloadFilename = () => {
@@ -515,7 +524,7 @@ export const ChainEditor: React.FC<ChainEditorProps> = ({ chain, allChains, curr
         setErrorMsg(null);
         try {
             const activeParams = { ...params };
-            const result = await generateImage(apiKey, finalPrompt, negativePrompt, activeParams);
+            const result = await generateImage(apiKey, finalPrompt, negativePrompt, activeParams, apiUrl || undefined);
             setGeneratedImage(result.image);
             // Use actual seed returned from generation
             const finalParams = { ...activeParams, seed: result.seed };
@@ -677,14 +686,39 @@ export const ChainEditor: React.FC<ChainEditorProps> = ({ chain, allChains, curr
                         </button>
                     </div>
 
-                    <div className="relative group">
-                        <input
-                            type="password"
-                            placeholder="API Key"
-                            className="w-16 md:w-32 focus:w-40 md:focus:w-64 transition-all bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-2 py-1 text-sm text-gray-800 dark:text-gray-200 outline-none focus:ring-1 focus:ring-indigo-500"
-                            value={apiKey}
-                            onChange={(e) => handleApiKeyChange(e.target.value)}
-                        />
+                    <div className="relative">
+                        <button
+                            onClick={() => setShowApiSettings(!showApiSettings)}
+                            className={`p-1.5 rounded transition-colors ${showApiSettings ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300' : 'text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800'}`}
+                            title="API 设置"
+                        >
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                        </button>
+                        {showApiSettings && (
+                            <div className="absolute right-0 top-full mt-2 w-72 md:w-80 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl z-50 p-3 space-y-2">
+                                <div>
+                                    <label className="text-xs text-gray-500 dark:text-gray-400 mb-1 block">API URL (留空使用官方地址)</label>
+                                    <input
+                                        type="text"
+                                        placeholder="https://image.novelai.net/ai/generate-image"
+                                        className="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-2 py-1.5 text-sm text-gray-800 dark:text-gray-200 outline-none focus:ring-1 focus:ring-indigo-500"
+                                        value={apiUrl}
+                                        onChange={(e) => handleApiUrlChange(e.target.value)}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-xs text-gray-500 dark:text-gray-400 mb-1 block">API Key (Bearer Token)</label>
+                                    <input
+                                        type="password"
+                                        placeholder="pst-..."
+                                        className="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-2 py-1.5 text-sm text-gray-800 dark:text-gray-200 outline-none focus:ring-1 focus:ring-indigo-500"
+                                        value={apiKey}
+                                        onChange={(e) => handleApiKeyChange(e.target.value)}
+                                    />
+                                </div>
+                                <p className="text-[10px] text-gray-400 dark:text-gray-500">设置自动保存到浏览器本地存储</p>
+                            </div>
+                        )}
                     </div>
 
                     {/* Fork / Save to Library Button */}

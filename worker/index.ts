@@ -632,7 +632,10 @@ export default {
         const body = await request.json();
         const clientAuth = request.headers.get('Authorization'); 
         if (!clientAuth) return error('Missing API Key', 401);
-        const naiRes = await fetch("https://image.novelai.net/ai/generate-image", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": clientAuth }, body: JSON.stringify(body) });
+        // 支持自定义 API URL（通过 X-API-URL header 传递）
+        const customApiUrl = request.headers.get('X-API-URL');
+        const targetUrl = customApiUrl || "https://image.novelai.net/ai/generate-image";
+        const naiRes = await fetch(targetUrl, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": clientAuth }, body: JSON.stringify(body) });
         if (!naiRes.ok) return error(await naiRes.text(), naiRes.status);
         const blob = await naiRes.blob();
         return new Response(blob, { headers: { ...corsHeaders, 'Content-Type': 'application/zip' } });

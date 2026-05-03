@@ -84,16 +84,21 @@ export const api = {
   },
   
   // Binary response for images
-  postBinary: async (endpoint: string, data: any, headers?: Record<string, string>) => {
+  postBinary: async (endpoint: string, data: any, headers?: Record<string, string>, customUrl?: string) => {
     let url = `${API_BASE}${endpoint}`;
+    let finalHeaders = { ...headers };
     
+    // 本地模式下，如果有自定义URL直接用，否则用默认NAI地址
     if (LOCAL_BYPASS_ENDPOINTS.includes(endpoint) && isLocalMode()) {
-      url = NAI_API_URL;
+      url = customUrl || NAI_API_URL;
+    } else if (customUrl) {
+      // 生产环境：通过 Worker 代理，将自定义 URL 作为 header 传递
+      finalHeaders['X-API-URL'] = customUrl;
     }
     
     const res = await fetch(url, {
       method: 'POST',
-      headers: getHeaders(headers),
+      headers: getHeaders(finalHeaders),
       body: JSON.stringify(data),
     });
     if (!res.ok) throw new Error(await res.text());
