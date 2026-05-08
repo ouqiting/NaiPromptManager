@@ -889,6 +889,16 @@ export const ArtistLibrary: React.FC<ArtistLibraryProps> = ({ isDark, toggleThem
                         >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"></path></svg>
                         </button>
+
+                        <a
+                            href="https://nai-bot.pages.dev/%E6%B3%95%E5%85%B8/artists-gallery/"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="法典画廊"
+                            className="h-8 px-3 rounded-full border border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 flex items-center gap-1 transition-colors text-sm font-medium"
+                        >
+                            📖 法典
+                        </a>
                     </div>
                 </div>
             </div>
