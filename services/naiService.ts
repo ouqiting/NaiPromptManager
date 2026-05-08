@@ -5,6 +5,31 @@ import { api } from './api';
 import { NAI_QUALITY_TAGS, NAI_UC_PRESETS } from './promptUtils';
 
 export const generateImage = async (apiKey: string, prompt: string, negative: string, params: NAIParams, apiUrl?: string) => {
+  // 重试逻辑：当错误包含 "pvp" 时自动重试
+  const maxRetries = 50; // 最大重试次数，防止无限循环
+  let lastError: any = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      if (attempt > 0) {
+        console.log(`[PVP Retry] 第 ${attempt} 次重试...`);
+      }
+      return await generateImageOnce(apiKey, prompt, negative, params, apiUrl);
+    } catch (e: any) {
+      lastError = e;
+      const errMsg = e.message || String(e);
+      if (errMsg.toLowerCase().includes('pvp') && attempt < maxRetries) {
+        console.log(`[PVP Retry] 检测到 PVP 错误，3秒后重试...`);
+        await new Promise(res => setTimeout(res, 3000));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastError;
+};
+
+const generateImageOnce = async (apiKey: string, prompt: string, negative: string, params: NAIParams, apiUrl?: string) => {
   // Logic update: NAI API treats missing seed as random. 0 is a specific seed.
   // We pass seed only if it is a valid number and not -1 (our internal convention for random).
   let seed: number | undefined = undefined;
