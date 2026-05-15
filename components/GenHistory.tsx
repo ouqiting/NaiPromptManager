@@ -267,6 +267,15 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
         await goToPage(targetPage, true);
     };
 
+    const refreshHistoryViewInBackground = (targetPage: number = currentPage) => {
+        window.setTimeout(() => {
+            void refreshHistoryView(targetPage).catch(error => {
+                console.error('刷新历史视图失败:', error);
+                notify('历史列表刷新失败，请手动点一次“刷新本地”', 'error');
+            });
+        }, 0);
+    };
+
     const loadFolderOptions = async (folderId: string, trail: Array<{ id: string; name: string; path: string }>) => {
         const folders = await googleDriveSync.listFolders(folderId);
         setFolderTrail(trail);
@@ -368,8 +377,9 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
             setShowDriveSetupModal(false);
 
             const summary = await syncPendingLocalItems(config.folderId);
-            await refreshHistoryView(1);
+            setIsDriveBusy(false);
             notify(`Google 云盘已连接，已上传 ${summary.uploaded} 张，跳过 ${summary.skipped} 张`);
+            refreshHistoryViewInBackground(1);
         } catch (error: any) {
             if (String(error.message || '').includes('GOOGLE_DRIVE_CLIENT_ID')) {
                 setShowDriveSetupModal(true);
@@ -413,8 +423,9 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
             setDriveConfig(config);
             setShowFolderPicker(false);
             const summary = await syncPendingLocalItems(config.folderId);
-            await refreshHistoryView(1);
+            setIsDriveBusy(false);
             notify(`同步目录已切换到 ${config.folderPath}，已上传 ${summary.uploaded} 张`);
+            refreshHistoryViewInBackground(1);
         } catch (error: any) {
             notify(`切换同步目录失败: ${error.message}`, 'error');
         } finally {
@@ -509,8 +520,9 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
                 }
             }
 
-            await refreshHistoryView(1);
+            setIsDriveBusy(false);
             notify(`云盘同步完成：上传 ${uploaded} 张，下载 ${downloaded} 张，跳过 ${skipped} 张${failed ? `，失败 ${failed} 张` : ''}`);
+            refreshHistoryViewInBackground(1);
         } catch (error: any) {
             if (String(error.message || '').includes('GOOGLE_DRIVE_CLIENT_ID')) {
                 setShowDriveSetupModal(true);
