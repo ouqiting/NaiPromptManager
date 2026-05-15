@@ -43,6 +43,7 @@ interface Env {
   BUCKET?: R2Bucket; // R2 Binding
   MASTER_KEY: string; 
   R2_PUBLIC_URL?: string; // Kept for legacy compatibility if needed
+  GOOGLE_DRIVE_CLIENT_ID?: string;
   // GUEST_PASSCODE removed, now stored in DB
 }
 
@@ -344,6 +345,12 @@ export default {
 
     if (!path.startsWith('/api/')) {
       return env.ASSETS.fetch(request);
+    }
+
+    if (path === '/api/public-config' && method === 'GET') {
+      return json({
+        googleDriveClientId: env.GOOGLE_DRIVE_CLIENT_ID || '',
+      });
     }
 
     if (method === 'OPTIONS') {

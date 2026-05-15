@@ -116,15 +116,62 @@ class GoogleDriveSyncService {
     private tokenClient: TokenClient | null = null;
     private accessToken: string | null = null;
     private tokenExpiresAt = 0;
+    private runtimeClientId: string | null = null;
+    private runtimeClientIdPromise: Promise<string> | null = null;
 
     getClientId() {
+        if (this.runtimeClientId) {
+            return this.runtimeClientId;
+        }
+
         if (typeof window === 'undefined') return '';
         return localStorage.getItem(CLIENT_ID_STORAGE_KEY) || '';
     }
 
     saveClientId(clientId: string) {
         if (typeof window === 'undefined') return;
-        localStorage.setItem(CLIENT_ID_STORAGE_KEY, clientId.trim());
+        const trimmed = clientId.trim();
+        this.runtimeClientId = trimmed;
+        localStorage.setItem(CLIENT_ID_STORAGE_KEY, trimmed);
+    }
+
+    async loadClientIdFromServer(force = false) {
+        if (!force && this.runtimeClientId !== null) {
+            return this.runtimeClientId;
+        }
+
+        if (!force && this.runtimeClientIdPromise) {
+            return this.runtimeClientIdPromise;
+        }
+
+        this.runtimeClientIdPromise = (async () => {
+            try {
+                const response = await fetch(`/api/public-config?_t=${Date.now()}`, {
+                    method: 'GET',
+                    cache: 'no-store',
+                });
+                if (!response.ok) {
+                    throw new Error('读取公开配置失败');
+                }
+
+                const payload = await response.json() as { googleDriveClientId?: string };
+                const serverClientId = (payload.googleDriveClientId || '').trim();
+                if (serverClientId) {
+                    this.saveClientId(serverClientId);
+                    return serverClientId;
+                }
+            } catch (error) {
+                console.warn('读取 Google Drive Client ID 失败:', error);
+            } finally {
+                this.runtimeClientIdPromise = null;
+            }
+
+            const fallback = this.getClientId();
+            this.runtimeClientId = fallback || '';
+            return this.runtimeClientId;
+        })();
+
+        return this.runtimeClientIdPromise;
     }
 
     getConfig(): GoogleDriveSyncConfig | null {
@@ -182,9 +229,9 @@ class GoogleDriveSyncService {
     }
 
     private async ensureToken(interactive: boolean) {
-        const clientId = this.getClientId();
+        const clientId = await this.loadClientIdFromServer();
         if (!clientId) {
-            throw new Error('请先填写 Google Client ID');
+            throw new Error('请先在 Cloudflare Pages 变量和机密中配置 GOOGLE_DRIVE_CLIENT_ID');
         }
 
         await this.loadGisScript();
@@ -333,9 +380,9 @@ class GoogleDriveSyncService {
     }
 
     async ensureAuthorized() {
-        const clientId = this.getClientId();
+        const clientId = await this.loadClientIdFromServer();
         if (!clientId) {
-            throw new Error('请先填写 Google Client ID');
+            throw new Error('请先在 Cloudflare Pages 变量和机密中配置 GOOGLE_DRIVE_CLIENT_ID');
         }
 
         await this.ensureToken(true);
@@ -378,9 +425,9 @@ class GoogleDriveSyncService {
     }
 
     async selectFolder(folder: GoogleDriveFolder) {
-        const clientId = this.getClientId();
+        const clientId = await this.loadClientIdFromServer();
         if (!clientId) {
-            throw new Error('请先填写 Google Client ID');
+            throw new Error('请先在 Cloudflare Pages 变量和机密中配置 GOOGLE_DRIVE_CLIENT_ID');
         }
 
         const folderPath = await this.getFolderPath(folder.id);

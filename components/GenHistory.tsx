@@ -16,7 +16,6 @@ interface GenHistoryProps {
 
 export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onNavigateToPlayground }) => {
     const [driveConfig, setDriveConfig] = useState<GoogleDriveSyncConfig | null>(() => googleDriveSync.getConfig());
-    const [driveClientIdInput, setDriveClientIdInput] = useState(() => googleDriveSync.getClientId());
     const [showDriveSetupModal, setShowDriveSetupModal] = useState(false);
     const [isDriveBusy, setIsDriveBusy] = useState(false);
     const [showFolderPicker, setShowFolderPicker] = useState(false);
@@ -62,7 +61,7 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
 
     useEffect(() => {
         setDriveConfig(googleDriveSync.getConfig());
-        setDriveClientIdInput(googleDriveSync.getClientId());
+        void googleDriveSync.loadClientIdFromServer();
     }, []);
 
     const { PAGE_SIZE } = PAGINATION_CONFIG;
@@ -274,16 +273,6 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
         setFolderOptions(folders);
     };
 
-    const saveDriveClientId = () => {
-        if (!driveClientIdInput.trim()) {
-            notify('请先填写 Google Client ID', 'error');
-            return false;
-        }
-
-        googleDriveSync.saveClientId(driveClientIdInput);
-        return true;
-    };
-
     const markSyncFailed = async (item: LocalGenItem, message: string) => {
         await localHistory.update(item.id, current => ({
             ...current,
@@ -372,11 +361,6 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
     };
 
     const handleDriveAuthorize = async () => {
-        if (!saveDriveClientId()) {
-            setShowDriveSetupModal(true);
-            return;
-        }
-
         setIsDriveBusy(true);
         try {
             const config = await googleDriveSync.ensureAuthorized();
@@ -387,6 +371,9 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
             await refreshHistoryView(1);
             notify(`Google 云盘已连接，已上传 ${summary.uploaded} 张，跳过 ${summary.skipped} 张`);
         } catch (error: any) {
+            if (String(error.message || '').includes('GOOGLE_DRIVE_CLIENT_ID')) {
+                setShowDriveSetupModal(true);
+            }
             notify(`Google 云盘授权失败: ${error.message}`, 'error');
         } finally {
             setIsDriveBusy(false);
@@ -394,11 +381,6 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
     };
 
     const openFolderPicker = async () => {
-        if (!saveDriveClientId()) {
-            setShowDriveSetupModal(true);
-            return;
-        }
-
         setIsDriveBusy(true);
         try {
             const config = await googleDriveSync.ensureAuthorized();
@@ -406,6 +388,9 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
             await loadFolderOptions('root', [{ id: 'root', name: '我的云盘', path: '/' }]);
             setShowFolderPicker(true);
         } catch (error: any) {
+            if (String(error.message || '').includes('GOOGLE_DRIVE_CLIENT_ID')) {
+                setShowDriveSetupModal(true);
+            }
             notify(`读取云盘目录失败: ${error.message}`, 'error');
         } finally {
             setIsDriveBusy(false);
@@ -438,11 +423,6 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
     };
 
     const handleDriveRefresh = async () => {
-        if (!saveDriveClientId()) {
-            setShowDriveSetupModal(true);
-            return;
-        }
-
         setIsDriveBusy(true);
         try {
             const config = await googleDriveSync.ensureAuthorized();
@@ -532,6 +512,9 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
             await refreshHistoryView(1);
             notify(`云盘同步完成：上传 ${uploaded} 张，下载 ${downloaded} 张，跳过 ${skipped} 张${failed ? `，失败 ${failed} 张` : ''}`);
         } catch (error: any) {
+            if (String(error.message || '').includes('GOOGLE_DRIVE_CLIENT_ID')) {
+                setShowDriveSetupModal(true);
+            }
             notify(`云盘刷新失败: ${error.message}`, 'error');
         } finally {
             setIsDriveBusy(false);
@@ -585,11 +568,7 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
                             <div className="text-sm text-gray-500 dark:text-gray-400 flex items-center">共 {totalCount} 张</div>
                             <button
                                 onClick={() => {
-                                    if (!googleDriveSync.getClientId()) {
-                                        setShowDriveSetupModal(true);
-                                        return;
-                                    }
-                                    handleDriveAuthorize();
+                                    void handleDriveAuthorize();
                                 }}
                                 disabled={isDriveBusy}
                                 className="px-3 py-1 md:px-4 md:py-2 bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 rounded text-xs md:text-sm hover:bg-blue-200 dark:hover:bg-blue-900/50 disabled:opacity-60"
@@ -892,17 +871,13 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
             {showDriveSetupModal && (
                 <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
                     <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-md w-full shadow-2xl">
-                        <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-3">Google 云盘授权</h3>
+                        <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-3">配置 Google 云盘授权</h3>
                         <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-                            请输入 Google OAuth 的 Client ID。浏览器端授权只使用 Client ID，Client Secret 不会保存到前端。
+                            不需要在页面里手填。请到 Cloudflare Pages 的“变量和机密”中添加公开变量 `GOOGLE_DRIVE_CLIENT_ID`，值填你的 Google OAuth Client ID。
                         </p>
-                        <input
-                            type="text"
-                            value={driveClientIdInput}
-                            onChange={e => setDriveClientIdInput(e.target.value)}
-                            placeholder="请输入 Google Client ID"
-                            className="w-full px-3 py-2 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm outline-none dark:text-white mb-4"
-                        />
+                        <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-3 py-2 text-sm font-mono text-gray-700 dark:text-gray-300 mb-4">
+                            GOOGLE_DRIVE_CLIENT_ID=你的 Client ID
+                        </div>
                         <div className="flex gap-2">
                             <button
                                 onClick={() => setShowDriveSetupModal(false)}
@@ -911,11 +886,14 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
                                 取消
                             </button>
                             <button
-                                onClick={handleDriveAuthorize}
+                                onClick={async () => {
+                                    await googleDriveSync.loadClientIdFromServer(true);
+                                    await handleDriveAuthorize();
+                                }}
                                 disabled={isDriveBusy}
                                 className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold disabled:opacity-60"
                             >
-                                保存并授权
+                                已配置，重试授权
                             </button>
                         </div>
                     </div>
