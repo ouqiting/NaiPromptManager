@@ -4,6 +4,7 @@ import { PromptChain, PromptModule, User, CharacterParams, NAIParams } from '../
 import { compilePrompt } from '../services/promptUtils';
 import { generateImage } from '../services/naiService';
 import { localHistory } from '../services/localHistory';
+import { googleDriveSync } from '../services/googleDriveSync';
 import { api } from '../services/api';
 import { extractMetadata, parseNovelAIMetadata, IMPORT_SESSION_KEY } from '../services/metadataService';
 import { ChainEditorParams } from './ChainEditorParams';
@@ -111,6 +112,7 @@ export const ChainEditor: React.FC<ChainEditorProps> = ({ chain, allChains, curr
 
     // --- Initialization ---
     const prevChainIdRef = useRef<string | null>(null);
+    const hasInitializedPlaygroundDraftRef = useRef(false);
     const [loadedPreset, setLoadedPreset] = useState<string | null>(null);
 
     useEffect(() => {
@@ -151,6 +153,7 @@ export const ChainEditor: React.FC<ChainEditorProps> = ({ chain, allChains, curr
         }
         setActiveModules(initialModules);
         setHasChanges(false);
+        hasInitializedPlaygroundDraftRef.current = false;
 
         // Load API Key & URL
         const savedKey = localStorage.getItem('nai_api_key');
@@ -192,6 +195,46 @@ export const ChainEditor: React.FC<ChainEditorProps> = ({ chain, allChains, curr
         const compiled = compilePrompt(tempChain, subjectPrompt);
         setFinalPrompt(compiled);
     }, [basePrompt, modules, activeModules, subjectPrompt]);
+
+    useEffect(() => {
+        if (chain.id !== 'playground') {
+            return;
+        }
+
+        if (!hasInitializedPlaygroundDraftRef.current) {
+            hasInitializedPlaygroundDraftRef.current = true;
+            return;
+        }
+
+        const updatedModules = modules.map(m => ({
+            ...m,
+            isActive: activeModules[m.id] ?? true,
+        }));
+
+        onUpdateChain(chain.id, {
+            name: chainName,
+            description: chainDesc,
+            tags: chainTags,
+            basePrompt,
+            negativePrompt,
+            modules: updatedModules,
+            params,
+            variableValues: { subject: subjectPrompt },
+            updatedAt: Date.now(),
+        });
+    }, [
+        chain.id,
+        chainName,
+        chainDesc,
+        chainTags,
+        basePrompt,
+        negativePrompt,
+        modules,
+        activeModules,
+        params,
+        subjectPrompt,
+        onUpdateChain,
+    ]);
 
     const handleApiKeyChange = (val: string) => {
         setApiKey(val);
@@ -537,7 +580,41 @@ export const ChainEditor: React.FC<ChainEditorProps> = ({ chain, allChains, curr
             setGeneratedImage(result.image);
             // Use actual seed returned from generation
             const finalParams = { ...activeParams, seed: result.seed };
-            await localHistory.add(result.image, finalPrompt, finalParams);
+            const historyItem = await localHistory.add(result.image, finalPrompt, negativePrompt, finalParams);
+
+            if (googleDriveSync.isEnabled()) {
+                try {
+                    const config = googleDriveSync.getConfig();
+                    if (config?.folderId) {
+                        await localHistory.update(historyItem.id, item => ({
+                            ...item,
+                            driveStatus: 'syncing',
+                            driveFolderId: config.folderId,
+                            driveLastError: undefined,
+                        }));
+
+                        const synced = await googleDriveSync.uploadHistoryItem(historyItem, config.folderId);
+
+                        await localHistory.update(historyItem.id, item => ({
+                            ...item,
+                            driveStatus: 'synced',
+                            driveFolderId: config.folderId,
+                            driveImageFileId: synced.imageFileId || item.driveImageFileId,
+                            driveMetaFileId: synced.metaFileId,
+                            remoteBaseName: synced.remoteBaseName,
+                            driveSyncedAt: Date.now(),
+                            driveLastError: undefined,
+                        }));
+                    }
+                } catch (syncError: any) {
+                    console.warn('Google Drive 自动同步失败:', syncError);
+                    await localHistory.update(historyItem.id, item => ({
+                        ...item,
+                        driveStatus: 'failed',
+                        driveLastError: syncError?.message || '自动上传失败',
+                    }));
+                }
+            }
         } catch (e: any) {
             setErrorMsg(e.message);
             notify(e.message, 'error');

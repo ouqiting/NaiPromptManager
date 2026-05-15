@@ -4,7 +4,8 @@ import { localHistory } from '../services/localHistory';
 import { db } from '../services/dbService';
 import { LocalGenItem, User } from '../types';
 import { PAGINATION_CONFIG } from '../config/pagination';
-import { IMPORT_SESSION_KEY } from '../services/metadataService';
+import { extractMetadataFromDataUrl, IMPORT_SESSION_KEY, parseNovelAIMetadata, stringifyNovelAIMetadata } from '../services/metadataService';
+import { GoogleDriveFolder, GoogleDriveSyncConfig, googleDriveSync } from '../services/googleDriveSync';
 import { ParamsViewer } from './ParamsViewer';
 
 interface GenHistoryProps {
@@ -14,6 +15,15 @@ interface GenHistoryProps {
 }
 
 export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onNavigateToPlayground }) => {
+    const [driveConfig, setDriveConfig] = useState<GoogleDriveSyncConfig | null>(() => googleDriveSync.getConfig());
+    const [driveClientIdInput, setDriveClientIdInput] = useState(() => googleDriveSync.getClientId());
+    const [showDriveSetupModal, setShowDriveSetupModal] = useState(false);
+    const [isDriveBusy, setIsDriveBusy] = useState(false);
+    const [showFolderPicker, setShowFolderPicker] = useState(false);
+    const [folderTrail, setFolderTrail] = useState<Array<{ id: string; name: string; path: string }>>([
+        { id: 'root', name: '我的云盘', path: '/' }
+    ]);
+    const [folderOptions, setFolderOptions] = useState<GoogleDriveFolder[]>([]);
     const [items, setItems] = useState<LocalGenItem[]>([]);
     const [lightbox, setLightbox] = useState<LocalGenItem | null>(null);
     const [isPublishing, setIsPublishing] = useState(false);
@@ -39,8 +49,20 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
     const [cleanCount, setCleanCount] = useState<number>(PAGINATION_CONFIG.CLEANUP.DEFAULT_COUNT);
     const [cleanPreviewCount, setCleanPreviewCount] = useState(0);
 
+    const buildConflictCopy = (source: LocalGenItem): LocalGenItem => ({
+        ...source,
+        id: crypto.randomUUID(),
+        driveStatus: 'synced',
+        driveLastError: undefined,
+    });
+
     useEffect(() => {
         goToPage(1);
+    }, []);
+
+    useEffect(() => {
+        setDriveConfig(googleDriveSync.getConfig());
+        setDriveClientIdInput(googleDriveSync.getClientId());
     }, []);
 
     const { PAGE_SIZE } = PAGINATION_CONFIG;
@@ -241,6 +263,281 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
         }
     };
 
+    const refreshHistoryView = async (targetPage: number = currentPage) => {
+        setCacheState({});
+        await goToPage(targetPage, true);
+    };
+
+    const loadFolderOptions = async (folderId: string, trail: Array<{ id: string; name: string; path: string }>) => {
+        const folders = await googleDriveSync.listFolders(folderId);
+        setFolderTrail(trail);
+        setFolderOptions(folders);
+    };
+
+    const saveDriveClientId = () => {
+        if (!driveClientIdInput.trim()) {
+            notify('请先填写 Google Client ID', 'error');
+            return false;
+        }
+
+        googleDriveSync.saveClientId(driveClientIdInput);
+        return true;
+    };
+
+    const markSyncFailed = async (item: LocalGenItem, message: string) => {
+        await localHistory.update(item.id, current => ({
+            ...current,
+            driveStatus: 'failed',
+            driveLastError: message,
+        }));
+    };
+
+    const syncPendingLocalItems = async (folderId: string) => {
+        const pendingItems = await localHistory.getPendingSyncItems(folderId);
+        let uploaded = 0;
+        let skipped = 0;
+        let failed = 0;
+
+        for (const item of pendingItems) {
+            try {
+                await localHistory.update(item.id, current => ({
+                    ...current,
+                    driveStatus: 'syncing',
+                    driveFolderId: folderId,
+                    driveLastError: undefined,
+                }));
+
+                const result = await googleDriveSync.uploadHistoryItem(item, folderId);
+
+                await localHistory.update(item.id, current => ({
+                    ...current,
+                    driveStatus: 'synced',
+                    driveFolderId: folderId,
+                    driveImageFileId: result.imageFileId || current.driveImageFileId,
+                    driveMetaFileId: result.metaFileId,
+                    remoteBaseName: result.remoteBaseName,
+                    driveSyncedAt: Date.now(),
+                    driveLastError: undefined,
+                }));
+
+                if (result.skipped) {
+                    skipped += 1;
+                } else {
+                    uploaded += 1;
+                }
+            } catch (error: any) {
+                failed += 1;
+                await markSyncFailed(item, error?.message || '上传失败');
+            }
+        }
+
+        return { uploaded, skipped, failed };
+    };
+
+    const resolveHistoryMetadata = async (item: LocalGenItem) => {
+        if (item.negativePrompt !== undefined) {
+            return {
+                prompt: item.prompt,
+                negativePrompt: item.negativePrompt || '',
+                params: item.params,
+                rawMetadata: stringifyNovelAIMetadata({
+                    prompt: item.prompt,
+                    negativePrompt: item.negativePrompt,
+                    params: item.params,
+                }),
+            };
+        }
+
+        const rawMetadata = await extractMetadataFromDataUrl(item.imageUrl);
+        if (rawMetadata) {
+            const parsed = parseNovelAIMetadata(rawMetadata, item.params);
+            return {
+                prompt: parsed.prompt,
+                negativePrompt: parsed.negativePrompt,
+                params: parsed.params,
+                rawMetadata,
+            };
+        }
+
+        return {
+            prompt: item.prompt,
+            negativePrompt: '',
+            params: item.params,
+            rawMetadata: stringifyNovelAIMetadata({
+                prompt: item.prompt,
+                negativePrompt: '',
+                params: item.params,
+            }),
+        };
+    };
+
+    const handleDriveAuthorize = async () => {
+        if (!saveDriveClientId()) {
+            setShowDriveSetupModal(true);
+            return;
+        }
+
+        setIsDriveBusy(true);
+        try {
+            const config = await googleDriveSync.ensureAuthorized();
+            setDriveConfig(config);
+            setShowDriveSetupModal(false);
+
+            const summary = await syncPendingLocalItems(config.folderId);
+            await refreshHistoryView(1);
+            notify(`Google 云盘已连接，已上传 ${summary.uploaded} 张，跳过 ${summary.skipped} 张`);
+        } catch (error: any) {
+            notify(`Google 云盘授权失败: ${error.message}`, 'error');
+        } finally {
+            setIsDriveBusy(false);
+        }
+    };
+
+    const openFolderPicker = async () => {
+        if (!saveDriveClientId()) {
+            setShowDriveSetupModal(true);
+            return;
+        }
+
+        setIsDriveBusy(true);
+        try {
+            const config = await googleDriveSync.ensureAuthorized();
+            setDriveConfig(config);
+            await loadFolderOptions('root', [{ id: 'root', name: '我的云盘', path: '/' }]);
+            setShowFolderPicker(true);
+        } catch (error: any) {
+            notify(`读取云盘目录失败: ${error.message}`, 'error');
+        } finally {
+            setIsDriveBusy(false);
+        }
+    };
+
+    const handleSelectCurrentFolder = async () => {
+        const currentFolder = folderTrail[folderTrail.length - 1];
+        if (!currentFolder || currentFolder.id === 'root') {
+            notify('请选择一个具体文件夹作为同步目录', 'error');
+            return;
+        }
+
+        setIsDriveBusy(true);
+        try {
+            const config = await googleDriveSync.selectFolder({
+                id: currentFolder.id,
+                name: currentFolder.name,
+            });
+            setDriveConfig(config);
+            setShowFolderPicker(false);
+            const summary = await syncPendingLocalItems(config.folderId);
+            await refreshHistoryView(1);
+            notify(`同步目录已切换到 ${config.folderPath}，已上传 ${summary.uploaded} 张`);
+        } catch (error: any) {
+            notify(`切换同步目录失败: ${error.message}`, 'error');
+        } finally {
+            setIsDriveBusy(false);
+        }
+    };
+
+    const handleDriveRefresh = async () => {
+        if (!saveDriveClientId()) {
+            setShowDriveSetupModal(true);
+            return;
+        }
+
+        setIsDriveBusy(true);
+        try {
+            const config = await googleDriveSync.ensureAuthorized();
+            setDriveConfig(config);
+
+            const localItems = await localHistory.getAll();
+            const localItemMap = new Map(localItems.map(item => [item.id, item]));
+
+            let { uploaded, skipped, failed } = await syncPendingLocalItems(config.folderId);
+            let downloaded = 0;
+
+            const remoteMetaFiles = await googleDriveSync.listRemoteHistoryMeta(config.folderId);
+            for (const remoteMetaFile of remoteMetaFiles) {
+                try {
+                    const meta = await googleDriveSync.downloadRemoteMeta(remoteMetaFile.id);
+                    const existing = localItemMap.get(meta.id);
+
+                    if (existing) {
+                        const samePayload =
+                            existing.createdAt === meta.createdAt &&
+                            existing.prompt === meta.prompt &&
+                            (existing.negativePrompt || '') === (meta.negativePrompt || '') &&
+                            JSON.stringify(existing.params || {}) === JSON.stringify(meta.params || {});
+
+                        if (!samePayload) {
+                            const imageUrl = await googleDriveSync.downloadRemoteImage(meta.imageFileId);
+                            const conflictCopy = buildConflictCopy({
+                                id: meta.id,
+                                imageUrl,
+                                prompt: meta.prompt,
+                                negativePrompt: meta.negativePrompt,
+                                params: meta.params,
+                                createdAt: meta.createdAt,
+                                driveStatus: 'synced',
+                                driveFolderId: config.folderId,
+                                driveImageFileId: meta.imageFileId,
+                                driveMetaFileId: remoteMetaFile.id,
+                                remoteBaseName: meta.remoteBaseName,
+                                driveSyncedAt: Date.now(),
+                            });
+
+                            await localHistory.upsert(conflictCopy);
+                            localItemMap.set(conflictCopy.id, conflictCopy);
+                            downloaded += 1;
+                            continue;
+                        }
+
+                        await localHistory.update(existing.id, current => ({
+                            ...current,
+                            driveStatus: 'synced',
+                            driveFolderId: config.folderId,
+                            driveImageFileId: meta.imageFileId,
+                            driveMetaFileId: remoteMetaFile.id,
+                            remoteBaseName: meta.remoteBaseName,
+                            driveSyncedAt: Date.now(),
+                            driveLastError: undefined,
+                        }));
+                        skipped += 1;
+                        continue;
+                    }
+
+                    const imageUrl = await googleDriveSync.downloadRemoteImage(meta.imageFileId);
+                    const importedItem: LocalGenItem = {
+                        id: meta.id,
+                        imageUrl,
+                        prompt: meta.prompt,
+                        negativePrompt: meta.negativePrompt,
+                        params: meta.params,
+                        createdAt: meta.createdAt,
+                        driveStatus: 'synced',
+                        driveFolderId: config.folderId,
+                        driveImageFileId: meta.imageFileId,
+                        driveMetaFileId: remoteMetaFile.id,
+                        remoteBaseName: meta.remoteBaseName,
+                        driveSyncedAt: Date.now(),
+                    };
+
+                    await localHistory.upsert(importedItem);
+                    localItemMap.set(importedItem.id, importedItem);
+                    downloaded += 1;
+                } catch (error: any) {
+                    failed += 1;
+                    console.warn('从 Google Drive 拉取历史失败', error);
+                }
+            }
+
+            await refreshHistoryView(1);
+            notify(`云盘同步完成：上传 ${uploaded} 张，下载 ${downloaded} 张，跳过 ${skipped} 张${failed ? `，失败 ${failed} 张` : ''}`);
+        } catch (error: any) {
+            notify(`云盘刷新失败: ${error.message}`, 'error');
+        } finally {
+            setIsDriveBusy(false);
+        }
+    };
+
     const handlePublish = async () => {
         if (!lightbox) return;
         if (!publishTitle.trim()) {
@@ -249,11 +546,12 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
         }
         setIsPublishing(true);
         try {
+            const metadata = await resolveHistoryMetadata(lightbox);
             await db.saveInspiration({
                 id: crypto.randomUUID(),
                 title: publishTitle,
                 imageUrl: lightbox.imageUrl,
-                prompt: lightbox.prompt,
+                prompt: metadata.rawMetadata,
                 userId: currentUser.id,
                 username: currentUser.username,
                 createdAt: Date.now()
@@ -272,49 +570,83 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
     return (
         <div className="flex-1 flex flex-col h-full bg-gray-50 dark:bg-gray-900 overflow-hidden">
             <header className="p-4 md:p-6 bg-white dark:bg-gray-800 shadow-md border-b border-gray-200 dark:border-gray-700 z-10 flex-shrink-0">
-                <div className="flex justify-between items-center mb-4">
-                    <div>
-                        <h1 className="text-xl md:text-2xl font-bold text-gray-900 dark:text-white">本地生图历史</h1>
-                        <p className="text-xs text-gray-500 dark:text-gray-400">仅存储在您的浏览器中</p>
-                    </div>
-                    <div className="flex gap-2 md:gap-3 items-center">
-                        <div className="text-sm text-gray-500 dark:text-gray-400 flex items-center">共 {totalCount} 张</div>
-                        <div className="relative">
-                            <button 
-                                onClick={() => setShowCleanMenu(!showCleanMenu)} 
-                                className="px-3 py-1 md:px-4 md:py-2 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded text-xs md:text-sm hover:bg-red-200 dark:hover:bg-red-900/50 flex items-center gap-1"
-                            >
-                                清理
-                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                </svg>
-                            </button>
-                            {showCleanMenu && (
-                                <div className="absolute right-0 mt-1 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-50">
-                                    <button 
-                                        onClick={handleClearAll} 
-                                        className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 rounded-t-lg"
-                                    >
-                                        🗑️ 清空全部
-                                    </button>
-                                    <button 
-                                        onClick={() => handleCleanMenuClick('days')} 
-                                        className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
-                                    >
-                                        ⏰ 删除 X 天前的...
-                                    </button>
-                                    <button 
-                                        onClick={() => handleCleanMenuClick('count')} 
-                                        className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 rounded-b-lg"
-                                    >
-                                        📊 只保留最近 N 张...
-                                    </button>
-                                </div>
-                            )}
+                <div className="flex flex-col gap-4 mb-4">
+                    <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                        <div>
+                            <h1 className="text-xl md:text-2xl font-bold text-gray-900 dark:text-white">本地生图历史</h1>
+                            <p className="text-xs text-gray-500 dark:text-gray-400">本地会继续保存，连接 Google 云盘后可同步到其他浏览器</p>
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                {driveConfig?.enabled
+                                    ? `当前云盘目录：${driveConfig.folderPath}`
+                                    : '当前未连接 Google 云盘，默认会建议同步到 /novelai/'}
+                            </p>
                         </div>
-                        <button onClick={() => goToPage(currentPage)} className="px-3 py-1 md:px-4 md:py-2 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded text-xs md:text-sm hover:bg-gray-200 dark:hover:bg-gray-600">
-                            刷新
-                        </button>
+                        <div className="flex flex-wrap gap-2 md:gap-3 items-center">
+                            <div className="text-sm text-gray-500 dark:text-gray-400 flex items-center">共 {totalCount} 张</div>
+                            <button
+                                onClick={() => {
+                                    if (!googleDriveSync.getClientId()) {
+                                        setShowDriveSetupModal(true);
+                                        return;
+                                    }
+                                    handleDriveAuthorize();
+                                }}
+                                disabled={isDriveBusy}
+                                className="px-3 py-1 md:px-4 md:py-2 bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 rounded text-xs md:text-sm hover:bg-blue-200 dark:hover:bg-blue-900/50 disabled:opacity-60"
+                            >
+                                {driveConfig?.enabled ? 'Google 云盘已授权' : 'Google 云盘授权'}
+                            </button>
+                            <button
+                                onClick={openFolderPicker}
+                                disabled={isDriveBusy}
+                                className="px-3 py-1 md:px-4 md:py-2 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-300 rounded text-xs md:text-sm hover:bg-indigo-200 dark:hover:bg-indigo-900/50 disabled:opacity-60"
+                            >
+                                选择同步文件夹
+                            </button>
+                            <div className="relative">
+                                <button 
+                                    onClick={() => setShowCleanMenu(!showCleanMenu)} 
+                                    className="px-3 py-1 md:px-4 md:py-2 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded text-xs md:text-sm hover:bg-red-200 dark:hover:bg-red-900/50 flex items-center gap-1"
+                                >
+                                    清理
+                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                    </svg>
+                                </button>
+                                {showCleanMenu && (
+                                    <div className="absolute right-0 mt-1 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-50">
+                                        <button 
+                                            onClick={handleClearAll} 
+                                            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 rounded-t-lg"
+                                        >
+                                            🗑️ 清空全部
+                                        </button>
+                                        <button 
+                                            onClick={() => handleCleanMenuClick('days')} 
+                                            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
+                                        >
+                                            ⏰ 删除 X 天前的...
+                                        </button>
+                                        <button 
+                                            onClick={() => handleCleanMenuClick('count')} 
+                                            className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 rounded-b-lg"
+                                        >
+                                            📊 只保留最近 N 张...
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                            <button
+                                onClick={handleDriveRefresh}
+                                disabled={isDriveBusy}
+                                className="px-3 py-1 md:px-4 md:py-2 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-300 rounded text-xs md:text-sm hover:bg-emerald-200 dark:hover:bg-emerald-900/50 disabled:opacity-60"
+                            >
+                                {isDriveBusy ? '云盘同步中...' : '云盘刷新'}
+                            </button>
+                            <button onClick={() => goToPage(currentPage)} className="px-3 py-1 md:px-4 md:py-2 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded text-xs md:text-sm hover:bg-gray-200 dark:hover:bg-gray-600">
+                                刷新本地
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -435,6 +767,17 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
                                 >
                                     <img src={item.imageUrl} className="w-full h-full object-cover" loading="lazy" />
                                     <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors" />
+                                    <div className="absolute top-2 left-2">
+                                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium shadow ${
+                                            item.driveStatus === 'synced'
+                                                ? 'bg-emerald-500/90 text-white'
+                                                : item.driveStatus === 'failed'
+                                                    ? 'bg-amber-500/90 text-white'
+                                                    : 'bg-gray-900/70 text-white'
+                                        }`}>
+                                            {item.driveStatus === 'synced' ? '已同步' : item.driveStatus === 'failed' ? '待重试' : '本地'}
+                                        </span>
+                                    </div>
                                     <div className="absolute top-2 right-2 opacity-100 md:opacity-0 group-hover:opacity-100 transition-opacity">
                                         <button onClick={(e) => handleDelete(item.id, e)} className="p-1.5 bg-red-500 text-white rounded-full shadow hover:bg-red-600">
                                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
@@ -484,6 +827,7 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
                                 <ParamsViewer
                                     params={lightbox.params}
                                     prompt={lightbox.prompt}
+                                    negativePrompt={lightbox.negativePrompt}
                                     notify={notify}
                                 />
                             </div>
@@ -491,12 +835,12 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
                             <div className="border-t border-gray-200 dark:border-gray-800 pt-4 mt-4 space-y-3 flex-shrink-0">
                                 {/* 导入到编辑器 */}
                                 <button
-                                    onClick={() => {
-                                        // 将完整参数存入 sessionStorage
+                                    onClick={async () => {
+                                        const metadata = await resolveHistoryMetadata(lightbox);
                                         const importData = {
-                                            prompt: lightbox.prompt,
-                                            negativePrompt: '', // 历史记录中负面词已融合在 params 里
-                                            params: lightbox.params,
+                                            prompt: metadata.prompt,
+                                            negativePrompt: metadata.negativePrompt,
+                                            params: metadata.params,
                                         };
                                         sessionStorage.setItem(IMPORT_SESSION_KEY, JSON.stringify(importData));
                                         setLightbox(null);
@@ -544,6 +888,108 @@ export const GenHistory: React.FC<GenHistoryProps> = ({ currentUser, notify, onN
                 </div>
             )}
 
+
+            {showDriveSetupModal && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                    <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-md w-full shadow-2xl">
+                        <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-3">Google 云盘授权</h3>
+                        <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                            请输入 Google OAuth 的 Client ID。浏览器端授权只使用 Client ID，Client Secret 不会保存到前端。
+                        </p>
+                        <input
+                            type="text"
+                            value={driveClientIdInput}
+                            onChange={e => setDriveClientIdInput(e.target.value)}
+                            placeholder="请输入 Google Client ID"
+                            className="w-full px-3 py-2 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm outline-none dark:text-white mb-4"
+                        />
+                        <div className="flex gap-2">
+                            <button
+                                onClick={() => setShowDriveSetupModal(false)}
+                                className="flex-1 py-2 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-lg font-bold"
+                            >
+                                取消
+                            </button>
+                            <button
+                                onClick={handleDriveAuthorize}
+                                disabled={isDriveBusy}
+                                className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold disabled:opacity-60"
+                            >
+                                保存并授权
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {showFolderPicker && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                    <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-lg w-full shadow-2xl max-h-[80vh] flex flex-col">
+                        <div className="flex items-start justify-between gap-3 mb-4">
+                            <div>
+                                <h3 className="text-xl font-bold text-gray-900 dark:text-white">选择同步文件夹</h3>
+                                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">当前浏览路径：{folderTrail[folderTrail.length - 1]?.path || '/'}</p>
+                            </div>
+                            <button
+                                onClick={() => setShowFolderPicker(false)}
+                                className="text-gray-500 hover:text-gray-800 dark:hover:text-white"
+                            >
+                                关闭
+                            </button>
+                        </div>
+                        <div className="flex gap-2 mb-3 flex-wrap">
+                            {folderTrail.map((crumb, index) => (
+                                <button
+                                    key={crumb.id}
+                                    onClick={() => loadFolderOptions(crumb.id, folderTrail.slice(0, index + 1))}
+                                    className="px-2 py-1 text-xs rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600"
+                                >
+                                    {crumb.name}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="flex-1 overflow-y-auto border border-gray-200 dark:border-gray-700 rounded-lg">
+                            {folderOptions.length === 0 ? (
+                                <div className="p-6 text-center text-sm text-gray-500 dark:text-gray-400">当前目录下没有子文件夹</div>
+                            ) : (
+                                folderOptions.map(folder => (
+                                    <div key={folder.id} className="flex items-center justify-between px-4 py-3 border-b last:border-b-0 border-gray-200 dark:border-gray-700">
+                                        <div>
+                                            <div className="font-medium text-gray-900 dark:text-white">{folder.name}</div>
+                                            <div className="text-xs text-gray-500 dark:text-gray-400">文件夹 ID: {folder.id}</div>
+                                        </div>
+                                        <button
+                                            onClick={async () => {
+                                                const currentPath = folderTrail[folderTrail.length - 1]?.path || '/';
+                                                const nextPath = currentPath === '/' ? `/${folder.name}/` : `${currentPath}${folder.name}/`;
+                                                await loadFolderOptions(folder.id, [...folderTrail, { id: folder.id, name: folder.name, path: nextPath }]);
+                                            }}
+                                            className="px-3 py-1.5 text-xs rounded bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-300 hover:bg-indigo-200 dark:hover:bg-indigo-900/50"
+                                        >
+                                            进入
+                                        </button>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                        <div className="flex gap-2 mt-4">
+                            <button
+                                onClick={() => setShowFolderPicker(false)}
+                                className="flex-1 py-2 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-lg font-bold"
+                            >
+                                取消
+                            </button>
+                            <button
+                                onClick={handleSelectCurrentFolder}
+                                disabled={isDriveBusy || folderTrail[folderTrail.length - 1]?.id === 'root'}
+                                className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold disabled:opacity-60"
+                            >
+                                使用当前文件夹
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Clean Modal */}
             {showCleanModal && (

@@ -33,14 +33,16 @@ class LocalHistoryService {
         });
     }
 
-    async add(imageUrl: string, prompt: string, params: NAIParams): Promise<void> {
+    async add(imageUrl: string, prompt: string, negativePrompt: string, params: NAIParams): Promise<LocalGenItem> {
         const db = await this.open();
         const item: LocalGenItem = {
             id: crypto.randomUUID(),
             imageUrl,
             prompt,
+            negativePrompt,
             params,
-            createdAt: Date.now()
+            createdAt: Date.now(),
+            driveStatus: 'pending'
         };
 
         return new Promise((resolve, reject) => {
@@ -48,8 +50,54 @@ class LocalHistoryService {
             const store = transaction.objectStore(STORE_NAME);
             const request = store.add(item);
 
+            request.onsuccess = () => resolve(item);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async upsert(item: LocalGenItem): Promise<void> {
+        const db = await this.open();
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readwrite');
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.put(item);
+
             request.onsuccess = () => resolve();
             request.onerror = () => reject(request.error);
+        });
+    }
+
+    async getById(id: string): Promise<LocalGenItem | null> {
+        const db = await this.open();
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readonly');
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.get(id);
+
+            request.onsuccess = () => resolve((request.result as LocalGenItem) || null);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async update(id: string, updater: (item: LocalGenItem) => LocalGenItem): Promise<LocalGenItem | null> {
+        const existing = await this.getById(id);
+        if (!existing) {
+            return null;
+        }
+
+        const updated = updater(existing);
+        await this.upsert(updated);
+        return updated;
+    }
+
+    async getPendingSyncItems(folderId?: string): Promise<LocalGenItem[]> {
+        const items = await this.getAll();
+        return items.filter(item => {
+            if (folderId && item.driveFolderId && item.driveFolderId !== folderId) {
+                return true;
+            }
+
+            return item.driveStatus !== 'synced' || !item.driveImageFileId || !item.driveMetaFileId;
         });
     }
 

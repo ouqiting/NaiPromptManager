@@ -30,6 +30,12 @@ export interface ParsedNAIData {
     params: NAIParams;
 }
 
+interface SerializeNAIMetadataInput {
+    prompt: string;
+    negativePrompt?: string;
+    params: NAIParams;
+}
+
 // ========== 常量 / 预编译正则 ==========
 const COMPILED_REGEX = {
     Steps: /Steps:\s*([^,]+)/,
@@ -58,6 +64,28 @@ export const extractMetadata = async (file: File): Promise<string | null> => {
         return parseNaiGenerationData(text);
     } catch (e) {
         console.error('Failed to parse metadata', e);
+        return null;
+    }
+};
+
+export const extractMetadataFromDataUrl = async (dataUrl: string): Promise<string | null> => {
+    const matched = dataUrl.match(/^data:image\/png;base64,(.+)$/);
+    if (!matched) {
+        return null;
+    }
+
+    try {
+        const binary = atob(matched[1]);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+
+        const text = readPngTextChunks(bytes.buffer);
+        if (!text) return null;
+        return parseNaiGenerationData(text);
+    } catch (e) {
+        console.error('Failed to parse metadata from data url', e);
         return null;
     }
 };
@@ -253,6 +281,70 @@ export const parseNovelAIMetadata = (
     }
 
     return { prompt, negativePrompt: negative, params: newParams };
+};
+
+export const stringifyNovelAIMetadata = ({
+    prompt,
+    negativePrompt = '',
+    params,
+}: SerializeNAIMetadataInput): string => {
+    const qualityPrompt = (params.qualityToggle ?? true) ? `${prompt}${NAI_QUALITY_TAGS}` : prompt;
+
+    let fullNegativePrompt = negativePrompt;
+    const presetId = params.ucPreset ?? 4;
+    if (presetId !== 4) {
+        const presetText = NAI_UC_PRESETS[presetId];
+        if (presetText) {
+            fullNegativePrompt = `${presetText}${fullNegativePrompt}`;
+        }
+    }
+
+    const characters = params.characters || [];
+    const charCaptions = characters.map(character => ({
+        char_caption: character.prompt || '',
+        centers: [{ x: character.x, y: character.y }],
+    }));
+    const charNegativeCaptions = characters.map(character => ({
+        char_caption: character.negativePrompt || '',
+        centers: [{ x: character.x, y: character.y }],
+    }));
+
+    const payload: any = {
+        prompt: qualityPrompt,
+        uc: fullNegativePrompt,
+        steps: params.steps,
+        scale: params.scale,
+        sampler: params.sampler,
+        width: params.width,
+        height: params.height,
+        cfg_rescale: params.cfgRescale ?? 0,
+        skip_cfg_above_sigma: params.variety ? 58 : null,
+    };
+
+    if (params.seed !== undefined && params.seed !== null) {
+        payload.seed = params.seed;
+    }
+
+    if (characters.length > 0) {
+        payload.v4_prompt = {
+            caption: {
+                base_caption: qualityPrompt,
+                char_captions: charCaptions,
+            },
+            use_coords: params.useCoords ?? true,
+            use_order: true,
+        };
+
+        payload.v4_negative_prompt = {
+            caption: {
+                base_caption: fullNegativePrompt,
+                char_captions: charNegativeCaptions,
+            },
+            legacy_uc: false,
+        };
+    }
+
+    return JSON.stringify(payload);
 };
 
 // ========== 内部工具函数 ==========

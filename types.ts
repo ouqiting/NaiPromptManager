@@ -99,8 +99,16 @@ export interface LocalGenItem {
   id: string;
   imageUrl: string; // Base64
   prompt: string;
+  negativePrompt?: string;
   params: NAIParams;
   createdAt: number;
+  driveStatus?: 'pending' | 'syncing' | 'synced' | 'failed';
+  driveImageFileId?: string;
+  driveMetaFileId?: string;
+  driveFolderId?: string;
+  remoteBaseName?: string;
+  driveSyncedAt?: number;
+  driveLastError?: string;
 }
 
 // --- 使用统计相关类型 ---

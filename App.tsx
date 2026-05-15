@@ -13,6 +13,25 @@ import { PromptChain, User, Artist, Inspiration, ChainType } from './types';
 type ViewState = 'list' | 'characters' | 'edit' | 'library' | 'inspiration' | 'admin' | 'history' | 'playground';
 
 const CACHE_TTL = 60 * 60 * 1000; // 1 Hour Cache
+const PLAYGROUND_DRAFT_STORAGE_KEY = 'nai_playground_draft';
+
+const createDefaultPlaygroundChain = (userId?: string): PromptChain => ({
+  id: 'playground',
+  name: '生图实验室',
+  description: '临时生图实验，点击 Fork 可保存到库',
+  userId: userId || 'guest',
+  basePrompt: '',
+  negativePrompt: '',
+  modules: [],
+  params: {
+    width: 832, height: 1216, steps: 28, scale: 5, sampler: 'k_euler_ancestral', seed: undefined, qualityToggle: true, ucPreset: 4, characters: []
+  },
+  variableValues: { subject: '' },
+  type: 'style',
+  tags: [],
+  createdAt: Date.now(),
+  updatedAt: Date.now()
+});
 
 const App = () => {
   const [view, setView] = useState<ViewState>('list');
@@ -22,7 +41,14 @@ const App = () => {
   const [dbConfigError, setDbConfigError] = useState(false);
 
   // Playground State
-  const [playgroundChain, setPlaygroundChain] = useState<PromptChain | null>(null);
+  const [playgroundChain, setPlaygroundChain] = useState<PromptChain | null>(() => {
+    try {
+      const saved = localStorage.getItem(PLAYGROUND_DRAFT_STORAGE_KEY);
+      return saved ? JSON.parse(saved) as PromptChain : null;
+    } catch {
+      return null;
+    }
+  });
 
   // Data Cache State
   const [artistsCache, setArtistsCache] = useState<Artist[] | null>(null);
@@ -68,6 +94,11 @@ const App = () => {
       setLoading(false);
     });
   }, []);
+
+  useEffect(() => {
+    if (!playgroundChain) return;
+    localStorage.setItem(PLAYGROUND_DRAFT_STORAGE_KEY, JSON.stringify(playgroundChain));
+  }, [playgroundChain]);
 
   const refreshData = async (force = false) => {
     // Chains (Always load all chains so we can filter client side and do mutual imports)
@@ -146,24 +177,7 @@ const App = () => {
     }
 
     if (newView === 'playground' && !playgroundChain) {
-      // Initialize Playground Chain
-      setPlaygroundChain({
-        id: 'playground',
-        name: '生图实验室',
-        description: '临时生图实验，点击 Fork 可保存到库',
-        userId: currentUser?.id || 'guest',
-        basePrompt: '',
-        negativePrompt: '',
-        modules: [],
-        params: {
-          width: 832, height: 1216, steps: 28, scale: 5, sampler: 'k_euler_ancestral', seed: undefined, qualityToggle: true, ucPreset: 4, characters: []
-        },
-        variableValues: { subject: '' },
-        type: 'style',
-        tags: [],
-        createdAt: Date.now(),
-        updatedAt: Date.now()
-      });
+      setPlaygroundChain(createDefaultPlaygroundChain(currentUser?.id));
     }
   };
 
